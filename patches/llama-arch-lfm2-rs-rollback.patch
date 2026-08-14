@@ -1,0 +1,23 @@
+From: Zygote project
+Subject: llama.cpp: enable LFM2 recurrent-state rollback for KV-prefix caching
+
+LFM2.5 (Gated DeltaNet hybrid) needs per-token recurrent-state rollback
+snapshots for partial KV-cache erasure, which is what the native prompt-
+prefix cache relies on to trim divergent tails between turns. Default
+n_rs_seq=0 makes llama_memory_seq_rm fail for any partial trim, silently
+killing prefix caching. This is a local build change, not an upstream
+contribution.
+
+--- a/src/llama-arch.cpp
++++ b/src/llama-arch.cpp
+@@ -1001,6 +1001,10 @@ bool llm_arch_supports_rs_rollback(const llm_arch & arch) {
+         case LLM_ARCH_QWEN35:
+         case LLM_ARCH_QWEN35MOE:
+         case LLM_ARCH_DEEPSEEK4:
++        // Local build: LFM2 (Gated DeltaNet hybrid) needs recurrent-state
++        // rollback for KV-prefix reuse (multi-turn prompt caching on-device).
++        case LLM_ARCH_LFM2:
++        case LLM_ARCH_LFM2MOE:
+             return true;
+         default:
+             return false;

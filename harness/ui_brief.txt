@@ -1,0 +1,30 @@
+You are an autonomous UI engineer working on "ZYGOTE" — an on-device AI agent harness that runs natively on an Android phone (Samsung SM-M176B). Your task: build the front-end PWA. This is a self-contained brief; work autonomously to completion and verify with a real build.
+
+## Deliverable
+A working, buildable React + Vite (TypeScript) static PWA at C:\Users\guhan\orkestrate_ai\zygote-pwa\ that visually replicates the DeepSeek Harness web UI.
+
+## The reference image (MUST look at it first)
+Path: C:\Users\guhan\AppData\Roaming\Hermes\composer-images\composer_2026-08-13_16-47-26-314_0b743f.png
+Call vision_analyze on it and study the layout/colors/components exhaustively before writing code.
+
+## Written UI spec
+Read C:\Users\guhan\orkestrate_ai\harness\SPEC.md section 4 ("UI — DeepSeek Harness look, exact spec"). Summary:
+- Palette: near-black bg #0A0A0B, charcoal panels #161617, thin gray dividers, white primary text, blue accent #3B82F6 for active tab/status/stop button, gray #8A8A8E for tool calls/reasoning/metadata.
+- Layout: (1) left nav rail ~48px vertical: logo top, + (new chat), new session, search; gear bottom. (2) header: project title "Greetings from the user" in large white, right-aligned "Standard mode" chip with nodes icon, rounded "Session log" button top-right. (3) tabs: Chat (blue, blue underline) | Trajectory (gray). (4) conversation stream: user bubble right (dark rounded), "Context injection · AGENTS.md" rows (muted, doc icon), "Think · …" blocks (atom icon, gray), assistant text (large, bright), action icons (copy/thumbs up/down/share), "Update to-do list · 0/7 completed" rows (checklist icon), "Bash · <cmd>" rows (terminal icon), blue status line "Deep diving…" + elapsed seconds. (5) to-dos panel above composer: "To-dos · 1 in progress · 6 pending". (6) composer: big rounded input, placeholder "Message the agent", left + button, shield "Full access ⌄" chip, model selector chip showing local models ("LFM2.5-230M · Max ⌄", "LFM2.5-2.6B"), blue circular stop button when running. (7) bottom status bar: "2 turns · 3 steps · LLM 37.3s · Tool call 0.7s · TTFT avg 1.4s · 72 tok/s · Cache hit 66% · Input 38.7K". Icons: minimal inline SVGs.
+
+## Backend API contract (native app exposes on 127.0.0.1:8787)
+Create src/lib/api.ts against these endpoints. No hardcoded mock data in the UI; show a graceful "backend offline" state with retry button when fetch fails.
+- GET /v1/telemetry → { model, tok_per_sec, ttft_ms, ram_mb, battery_pct, turns, steps, llm_time_ms, tool_time_ms, cache_hit_pct, input_tokens }
+- POST /v1/agent/run → body { message, session_id } → text/event-stream of agent events (text deltas, think, tool_start, tool_result). Support streaming via fetch + ReadableStream parsing, with non-streaming fallback { final_text, events }.
+- GET /v1/skills → list of installed skills
+- GET /v1/session/{id} → trajectory events (Trajectory tab)
+
+## Tech constraints
+- React 18/19 + Vite + TypeScript. Hand-rolled CSS or Tailwind, your choice — must match the reference look: minimal, clean, dark.
+- `npm run build` must succeed producing static dist/ (no SSR, no Node backend). Vite base: './'.
+- Include manifest.webmanifest + minimal service worker (cache the shell) for offline PWA.
+- All files under C:\Users\guhan\orkestrate_ai\zygote-pwa\ only. Do not touch anything else.
+- UI title/brand: "zygote" (lowercase). Model selector lists LFM2.5-230M and LFM2.5-2.6B with "(local)" tag. English only.
+
+## Verification (required)
+After writing: cd C:\Users\guhan\orkestrate_ai\zygote-pwa && npm install && npm run build. Fix errors until build succeeds. Then report: the exact build result, the file tree, and how the UI maps to the reference image. Do NOT claim success without a passing build. If the environment fails, report exactly what happened.

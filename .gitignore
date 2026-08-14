@@ -1,0 +1,38 @@
+# --- toolchains & vendored deps (build prerequisites, not sources) ---
+llama.cpp/
+jdk/
+android-sdk/
+/bin/
+/app/
+
+# --- models (large binaries; see README for downloads) ---
+models/
+harness/models/
+*.gguf
+
+# --- Android / Gradle build output ---
+orkestrate-app/.gradle/
+orkestrate-app/build/
+orkestrate-app/app/build/
+orkestrate-app/lib/build/
+orkestrate-app/local.properties
+orkestrate-app/.kotlin/
+*.apk
+*.aab
+
+# --- native build artifacts ---
+orkestrate-app/lib/src/main/cpp/build-llama/
+orkestrate-app/lib/src/main/cpp/CMakeFiles/
+orkestrate-app/lib/src/main/cpp/cmake_install.cmake
+orkestrate-app/lib/src/main/cpp/CMakeCache.txt
+orkestrate-app/lib/.cxx/
+
+# --- PWA ---
+zygote-pwa/node_modules/
+zygote-pwa/dist/
+zygote-pwa/.vite/
+
+# --- misc ---
+*.log
+.DS_Store
+Thumbs.db
