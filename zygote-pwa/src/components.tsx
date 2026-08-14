@@ -20,7 +20,7 @@ import {
   IconCloudOff,
 } from './icons';
 
-export const LOCAL_MODELS = ['LFM2.5-1.2B'];
+export const LOCAL_MODELS = ['LFM2.5-1.2B', 'LFM2.5-230M'];
 
 export interface SessionMeta {
   session_id: string;

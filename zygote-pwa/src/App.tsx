@@ -47,6 +47,7 @@ function truncate(s: string, n: number) {
 function shortModel(f: string): string {
   // Map GGUF filenames back to the clean display names used in the picker.
   if (f.includes('1.2B')) return 'LFM2.5-1.2B';
+  if (f.includes('230M')) return 'LFM2.5-230M';
   return f.replace(/\.gguf$/, '');
 }
 

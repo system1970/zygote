@@ -467,9 +467,16 @@ class ZygoteServer(private val ctx: Context, private val port: Int = 8787) : Run
      *  a different GGUF was manually pushed (e.g. a new quant for testing). */
     private fun handleModelSwitch(socket: Socket, body: String) {
         val requested = Regex("\"model\"\\s*:\\s*\"([^\"]*)\"").find(body)?.groupValues?.get(1) ?: ""
-        // Only honor requests for models that are actually present on device.
+        // Map the requested display name to a file on device: match the FILENAME
+        // (requested.contains() would match every file — the request string is
+        // not the filename).
+        val core = when {
+            requested.contains("1.2B") -> "1.2B"
+            requested.contains("230M") -> "230M"
+            else -> requested
+        }
         val target = modelsDir.listFiles()?.firstOrNull {
-            it.name.endsWith(".gguf") && (requested.contains("1.2B") || requested.contains(it.name))
+            it.name.endsWith(".gguf") && it.name.contains(core)
         }
         if (target == null || target.name == loadedModelFile) {
             respondJson(socket, """{"ok":true,"model":"${loadedModelName()}"}""")
