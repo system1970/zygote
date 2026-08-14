@@ -265,12 +265,30 @@ class PhoneTools(private val context: Context) {
 
     private fun runShell(command: String): ToolResult {
         return try {
-            val proc = Runtime.getRuntime().exec(arrayOf("sh", "-c", command))
-            val out = proc.inputStream.bufferedReader().readText()
-            val err = proc.errorStream.bufferedReader().readText()
-            val code = proc.waitFor()
-            val text = if (out.isBlank() && err.isNotBlank()) err else out
-            ToolResult.Ok("exit=$code\n${text.trim().take(4000)}")
+            // Android apps run in a sandbox: `sh` inherits cwd=/ and no
+            // HOME/TMPDIR, so nearly every command fails with "Permission
+            // denied". Give the shell a writable home + temp dir first.
+            val home = context.filesDir.absolutePath
+            val tmp = context.cacheDir.absolutePath
+            val env = "export HOME='$home' TMPDIR='$tmp' TMP='$tmp' TEMP='$tmp'; "
+            val wrapped = "cd '$home' && $env $command"
+            var code = -1
+            var out = ""
+            // Prefer su (root) so the tool can actually manage the device when
+            // present; fall back to the sandboxed shell otherwise. The probe
+            // carries a hard timeout: an interactive su prompt must never be
+            // able to wedge the agent run.
+            val suProbe = ProcessBuilder("/system/bin/sh", "-c", "command -v su >/dev/null 2>&1 && su -c \"$wrapped\" || $wrapped")
+            suProbe.redirectErrorStream(true)
+            val proc = suProbe.start()
+            val done = proc.waitFor(15, java.util.concurrent.TimeUnit.SECONDS)
+            if (!done) {
+                proc.destroyForcibly()
+                return ToolResult.Error("shell timed out (interactive su prompt?)")
+            }
+            out = proc.inputStream.bufferedReader().readText()
+            code = proc.exitValue()
+            ToolResult.Ok("exit=$code\n${out.trim().take(4000)}")
         } catch (e: Exception) {
             ToolResult.Error("shell failed: ${e.message}")
         }
