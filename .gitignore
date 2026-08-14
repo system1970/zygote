@@ -14,6 +14,10 @@ submission/
 zygote-pwa/*.png
 zygote-pwa/public/*.png
 
+# --- debug screenshots from dev sessions (only the documented proof is kept) ---
+harness/proof/screenshots/*
+!harness/proof/screenshots/pwa_live.png
+
 # --- models (large binaries; see README for downloads) ---
 models/
 harness/models/
