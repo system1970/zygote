@@ -1,5 +1,0 @@
-<resources>
-    <string name="app_name">zygote</string>
-    <string name="phone_control_label">Zygote phone control</string>
-    <string name="accessibility_service_description">Lets the on-device Zygote agent read the screen and perform gestures (tap, type, swipe) to control this phone — all locally, no cloud.</string>
-</resources>
