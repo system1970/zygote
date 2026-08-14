@@ -5,6 +5,15 @@ android-sdk/
 /bin/
 /app/
 
+# --- stale submission copy (real one lives in harness/) ---
+submission/
+
+# --- old dev screenshots (kept out of the repo) ---
+/orkestrate_*.png
+/ref_chatgpt_*.png
+zygote-pwa/*.png
+zygote-pwa/public/*.png
+
 # --- models (large binaries; see README for downloads) ---
 models/
 harness/models/

@@ -4,30 +4,44 @@
 
 Zygote is a native Android agent that runs entirely on-device — no cloud, no server, no data leaving the phone. It combines a Kotlin agent harness (DeepSeek-Harness / opencode-inspired loop), llama.cpp inference with Arm KleidiAI kernels, a dependency-free embedded HTTP server, and a hyper-minimal PWA interface modeled on the DeepSeek Harness web UI.
 
-Built for the **Arm Create: AI Optimization Challenge — Track 3 (Mobile AI)**, targeting a $150 Samsung Galaxy M16 (SM-M176B, Exynos 1330, 2×Cortex-A78 + 6×Cortex-A55, no NPU, 8GB RAM).
+Built for the **Arm Create: AI Optimization Challenge — Track 3 (Mobile AI)**, targeting a $150 Samsung Galaxy M17 (SM-M176B, Exynos 1330, 2×Cortex-A78 + 6×Cortex-A55, no NPU, 8GB RAM).
 
-```
-┌───────────────────────────────┐     ┌──────────────────────────────────────┐
-│  PWA (React) in WebView      │     │  ZygoteServer (raw ServerSocket)      │
-│  - DeepSeek-Harness-style UI │◄───►│  - serves PWA from assets             │
-│  - sessions, todos, telemetry│     │  - /v1/agent/run  (SSE stream)        │
-└───────────────────────────────┘     │  - /v1/telemetry (per-session)       │
-                                      │  - /v1/sessions, /v1/session/{id}    │
-                                      └──────────────┬───────────────────────┘
-                                                     │
-                                      ┌──────────────▼───────────────────────┐
-                                      │  AgentLoop (Kotlin, com.zygote.agent) │
-                                      │  - tool loop: model → tool → result   │
-                                      │  - JSONL sessions (Claude-Code style)  │
-                                      │  - opencode admission + resume         │
-                                      └──────────────┬───────────────────────┘
-                                                     │
-                                      ┌──────────────▼───────────────────────┐
-                                      │  NativeModelBackend → llama.cpp (.so) │
-                                      │  - KleidiAI Q4_0 (DotProd, A78 path)  │
-                                      │  - KV-prefix cache across turns       │
-                                      │  - relevance-filtered tool schemas    │
-                                      └──────────────────────────────────────┘
+```mermaid
+flowchart TB
+    subgraph UI["PWA (React, in WebView)"]
+        A["Chat stream + sessions sidebar"]
+        B["To-dos panel"]
+        C["Status bar (per-session telemetry)"]
+    end
+
+    subgraph SRV["ZygoteServer — dependency-free embedded server (127.0.0.1:8787)"]
+        D["Static: serves PWA from assets"]
+        E["POST /v1/agent/run — SSE event stream"]
+        F["GET /v1/telemetry?session=<id>"]
+        G["GET /v1/sessions · /v1/session/{id}"]
+    end
+
+    subgraph HARNESS["AgentLoop (Kotlin · com.zygote.agent)"]
+        H["Tool loop: model → tool → result"]
+        I["SessionStore: append-only JSONL"]
+        J["Tool registry: 11 tools + relevance filter"]
+    end
+
+    subgraph NATIVE["NativeModelBackend → llama.cpp (.so)"]
+        K["KleidiAI Q4_0 kernels (A78 DotProd)"]
+        L["KV-prefix cache across turns"]
+        M["LFM2.5 tool-call parsing"]
+    end
+
+    A --> D
+    B --> F
+    C --> F
+    E --> H
+    H --> I
+    H --> J
+    H --> K
+    K --> L
+    K --> M
 ```
 
 ## Why it matters
