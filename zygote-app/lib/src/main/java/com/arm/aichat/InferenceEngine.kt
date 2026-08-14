@@ -47,6 +47,14 @@ interface InferenceEngine {
     suspend fun setBigCorePinning(enabled: Boolean)
 
     /**
+     * Loads a draft model for speculative decoding (230M drafts, the main model
+     * verifies). Safe: failure leaves the engine on the single-model path.
+     */
+    suspend fun setDraftModel(modelPath: String): Boolean
+
+    /** Spec stats as "active|rounds|accepted|drafted" — empty when unavailable. */
+    fun getSpecStats(): String
+    /**
      * Cleans up resources when the engine is no longer needed.
      */
     fun destroy()

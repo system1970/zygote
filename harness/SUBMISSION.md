@@ -5,7 +5,7 @@
 > Named after Android's `zygote`: the process every app is forked from.**
 
 **Arm Create: AI Optimization Challenge · Track 3: Mobile AI**
-**Device:** Samsung SM-M176B (Exynos 1330 · 2×Cortex-A78 @2.4GHz + 6×Cortex-A55 @2.0GHz · Mali-G68 MP2 · 7.6GB RAM · **no NPU**)
+**Device:** Samsung Galaxy M17 (SM-M176B · Exynos 1330 · 2×Cortex-A78 @2.4GHz + 6×Cortex-A55 @2.0GHz · Mali-G68 MP2 · 7.6GB RAM · **no NPU**)
 
 ---
 
@@ -18,8 +18,10 @@ log, and a permission gate — all in Kotlin, driving llama.cpp through JNI on
 the Arm CPU. A minimal PWA (DeepSeek-Harness-style) is the UI surface.
 
 **Model + Harness = Agent.** The model is the skill-picker; the harness is the
-reliability engineering. Zygote runs LFM2.5 (230M fast path / 2.6B heavy path),
-both quantized for this device, and routes between them.
+reliability engineering. Zygote runs a **single optimized tier: LFM2.5-1.2B-Instruct
+Q4_0 (664 MB)** with KleidiAI DotProd kernels, a 4096-token context, native KV
+prefix caching (turn-2+ TTFT ~1.7 s), relevance-filtered tool schemas, and
+speculative decoding (230M draft model verifies in batched passes).
 
 ```
 PWA (React, WebView)  ── http://127.0.0.1:8787 ──►  ZygoteServer (in-app)

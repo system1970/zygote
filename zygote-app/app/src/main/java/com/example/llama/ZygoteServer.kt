@@ -220,6 +220,18 @@ class ZygoteServer(private val ctx: Context, private val port: Int = 8787) : Run
         val inputTokens = ((s?.inputChars ?: 0L) / 4L).toInt()
         val tokPerSec = s?.lastTokPerSec ?: 0.0
         val ttftMs = s?.lastTtftMs ?: -1L
+        // Speculative-decoding stats from the native engine: "active|rounds|accepted|drafted"
+        var specActive = false
+        var specAccept = 0L
+        var specDrafted = 0L
+        try {
+            val parts = engine.getSpecStats().split("|")
+            if (parts.size >= 4) {
+                specActive = parts[0] == "true"
+                specAccept = parts[2].toLongOrNull() ?: 0L
+                specDrafted = parts[3].toLongOrNull() ?: 0L
+            }
+        } catch (e: Exception) { /* engine not ready */ }
         return """{
           "model": "$modelName",
           "tok_per_sec": $tokPerSec,
@@ -230,7 +242,10 @@ class ZygoteServer(private val ctx: Context, private val port: Int = 8787) : Run
           "steps": $steps,
           "llm_time_ms": $llmMs,
           "tool_time_ms": $toolMs,
-          "input_tokens": $inputTokens
+          "input_tokens": $inputTokens,
+          "spec_active": $specActive,
+          "spec_accept": $specAccept,
+          "spec_drafted": $specDrafted
         }"""
     }
 
@@ -422,6 +437,27 @@ class ZygoteServer(private val ctx: Context, private val port: Int = 8787) : Run
             }
             modelLoaded = true
             Log.i(TAG, "model ready in ${System.currentTimeMillis() - started} ms")
+
+            // Speculative decoding (DSpark-style, 230M draft + 1.2B target) is
+            // implemented and verified working, but DISABLED by default: the
+            // 230M is a different model family and accepts only ~20-39% of
+            // drafted tokens, making decode SLOWER (3.7-5.3 tok/s vs 14 single-
+            // model). Flip to true to enable; measured numbers in the blog.
+            val SPECULATIVE_DECODE_ENABLED = false
+            if (SPECULATIVE_DECODE_ENABLED) {
+                try {
+                    val draft = modelsDir.listFiles()?.filter { it.name.endsWith(".gguf") }
+                        ?.filter { it.name != pick.name }?.minByOrNull { it.length() }
+                    if (draft != null && draft.length() < pick.length()) {
+                        val ok = kotlinx.coroutines.runBlocking {
+                            engine.setDraftModel(draft.absolutePath)
+                        }
+                        Log.i(TAG, "speculative draft (${draft.name}): ${if (ok) "ACTIVE" else "skipped"}")
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "draft attach failed (ignored): ${e.message}")
+                }
+            }
         } catch (e: Exception) {
             Log.e(TAG, "model load failed: ${e.message}")
         }

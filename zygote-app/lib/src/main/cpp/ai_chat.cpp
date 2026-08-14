@@ -10,6 +10,7 @@
 #include <string>
 #include <unistd.h>
 #include <sampling.h>
+#include <speculative.h>
 
 #include "logging.h"
 #include "chat.h"
@@ -31,19 +32,43 @@ static std::string join(const std::vector<T> &values, const std::string &delim) 
  * LLama resources: context, model, batch and sampler
  */
 constexpr int   N_THREADS_MIN           = 2;
-constexpr int   N_THREADS_MAX           = 4;
-constexpr int   N_THREADS_HEADROOM      = 2;
+constexpr int   N_THREADS_MAX           = 8;
+constexpr int   N_THREADS_HEADROOM      = 1;
 
 constexpr int   DEFAULT_CONTEXT_SIZE    = 4096;
 constexpr int   OVERFLOW_HEADROOM       = 4;
 constexpr int   BATCH_SIZE              = 512;
 constexpr float DEFAULT_SAMPLER_TEMP    = 0.3f;
 
+// KV cache quantization: the 1.2B decode at ~14 tok/s reads ~9.2 GB/s (46% of
+// LPDDR4X nominal) — compute/bandwidth-mixed, not pure-bandwidth-bound like the
+// 230M. Quantizing the attention K/V cache to Q8_0 halves KV traffic and frees
+// bandwidth for the weight reads that dominate decode.
+static ggml_type g_cache_type_k = GGML_TYPE_Q8_0;
+static ggml_type g_cache_type_v = GGML_TYPE_Q8_0;
+
 static llama_model                      * g_model;
 static llama_context                    * g_context;
 static llama_batch                        g_batch;
 static common_chat_templates_ptr          g_chat_templates;
 static common_sampler                   * g_sampler;
+
+// Speculative decoding state (draft model): the 230M drafts K tokens, the 1.2B
+// target verifies them in ONE batched forward pass (lossless, DSpark-style).
+static llama_model                      * g_model_dft = nullptr;
+static llama_context                    * g_context_dft = nullptr;
+static common_speculative               * g_spec = nullptr;
+static bool                              g_spec_active = false;
+static int                               g_spec_n_max = 5;   // draft length
+static std::vector<llama_token>          g_spec_queue;        // accepted tokens pending emission
+static llama_token                       g_spec_id_last = 0;  // last emitted token
+static llama_tokens                      g_spec_prompt;       // full target-context token list
+static int                               g_spec_n_past = 0;
+static llama_tokens                      g_system_tokens;     // system prompt tokens (draft mirror)
+// Spec stats (for telemetry / benchmarks)
+static long                              g_spec_n_accept = 0;
+static long                              g_spec_n_drafted = 0;
+static long                              g_spec_rounds = 0;
 
 // ARM optimization state: when true, inference threads are pinned to the
 // big (Cortex-A78) cores via sched_setaffinity (OpenMP-compatible).
@@ -54,6 +79,75 @@ JNIEXPORT void JNICALL
 Java_com_arm_aichat_internal_InferenceEngineImpl_setBigCorePinningNative(JNIEnv * /*env*/, jobject /*unused*/, jboolean enabled) {
     g_pin_big_cores = (enabled == JNI_TRUE);
     LOGi("Big-core pinning %s", g_pin_big_cores ? "ENABLED" : "disabled");
+}
+
+/**
+ * Loads a draft model for speculative decoding (230M + 1.2B target).
+ * Safe: any failure leaves the engine in the normal single-model path.
+ * Returns 0 on success, non-zero on failure (caller may ignore).
+ */
+extern "C"
+JNIEXPORT jint JNICALL
+Java_com_arm_aichat_internal_InferenceEngineImpl_setDraftModelNative(JNIEnv *env, jobject /*unused*/, jstring jmodel_path) {
+    if (g_spec_active) {
+        return 0;
+    }
+    const auto *model_path = env->GetStringUTFChars(jmodel_path, 0);
+    LOGi("%s: Loading draft model: %s", __func__, model_path);
+
+    llama_model_params mparams = llama_model_default_params();
+    auto *model_dft = llama_model_load_from_file(model_path, mparams);
+    env->ReleaseStringUTFChars(jmodel_path, model_path);
+    if (!model_dft) {
+        LOGe("%s: failed to load draft model", __func__);
+        return 1;
+    }
+
+    // Draft context: same n_ctx as the target (4096) — the draft mirrors the
+    // FULL conversation, so a smaller context would fail on long sessions.
+    // Same n_rs_seq so partial KV trims work on the hybrid arch.
+    llama_context_params cparams = llama_context_default_params();
+    cparams.n_ctx = DEFAULT_CONTEXT_SIZE;
+    cparams.n_batch = BATCH_SIZE;
+    cparams.n_ubatch = BATCH_SIZE;
+    cparams.n_threads = 2;
+    cparams.n_threads_batch = 2;
+    cparams.type_k = g_cache_type_k;
+    cparams.type_v = g_cache_type_v;
+    cparams.n_rs_seq = 256;
+    auto *ctx_dft = llama_init_from_model(model_dft, cparams);
+    if (!ctx_dft) {
+        LOGe("%s: failed to init draft context", __func__);
+        llama_model_free(model_dft);
+        return 2;
+    }
+
+    common_params_speculative sp_params;
+    sp_params.types = { COMMON_SPECULATIVE_TYPE_DRAFT_SIMPLE };
+    sp_params.draft.n_max = g_spec_n_max;
+    sp_params.draft.ctx_dft = ctx_dft;
+    sp_params.draft.ctx_tgt = g_context;
+
+    try {
+        g_spec = common_speculative_init(sp_params, 1);
+    } catch (const std::exception & e) {
+        LOGe("%s: spec init failed: %s", __func__, e.what());
+        llama_free(ctx_dft);
+        llama_model_free(model_dft);
+        return 3;
+    }
+    if (!g_spec) {
+        LOGe("%s: spec init returned null", __func__);
+        llama_free(ctx_dft);
+        llama_model_free(model_dft);
+        return 4;
+    }
+
+    g_model_dft = model_dft;
+    g_context_dft = ctx_dft;
+    g_spec_active = true;
+    LOGi("%s: speculative decoding ACTIVE (draft n_max=%d)", __func__, g_spec_n_max);
+    return 0;
 }
 
 extern "C"
@@ -117,6 +211,10 @@ static llama_context *init_context(llama_model *model, const int n_ctx = DEFAULT
     ctx_params.n_ubatch = BATCH_SIZE;
     ctx_params.n_threads = n_threads;
     ctx_params.n_threads_batch = n_threads;
+    // Q8_0 KV cache: halves attention KV traffic on a decode that is only
+    // ~46% bandwidth-saturated — frees bandwidth for the dominant weight reads.
+    ctx_params.type_k = g_cache_type_k;
+    ctx_params.type_v = g_cache_type_v;
     // LFM2.5 is a Gated DeltaNet hybrid (linear attention): partial KV-cache
     // erasure (prompt-prefix reuse) requires per-token rollback snapshots in
     // the recurrent state. Default n_rs_seq=0 makes llama_memory_seq_rm fail
@@ -463,6 +561,10 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_processSystemPrompt(
     for (auto id: system_tokens) {
         LOGv("token: `%s`\t -> `%d`", common_token_to_piece(g_context, id).c_str(), id);
     }
+    // Remember for speculative decoding: the draft context mirrors the target
+    // KV layout [system @ 0..S][conversation @ S..], so we must replay the
+    // system tokens on the draft too.
+    g_system_tokens = system_tokens;
 
     // Handle context overflow
     const int max_batch_size = DEFAULT_CONTEXT_SIZE - OVERFLOW_HEADROOM;
@@ -586,6 +688,60 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_processUserPrompt(
     // Remember this prompt for the next turn's prefix match.
     g_cached_prompt_tokens = user_tokens;
     g_prompt_cache_valid = true;
+
+    // Speculative decoding setup: mirror the prompt on the draft context and
+    // tell the speculator where generation starts. The draft KV must match the
+    // target layout [system @ 0..S][conversation @ S..], so clear + replay the
+    // FULL prompt on the draft (230M prefill is ~4x faster than the 1.2B).
+    if (g_spec_active) {
+        llama_memory_clear(llama_get_memory(g_context_dft), false);
+        // Mirror system + conversation on the draft context.
+        // NOTE: keep the LAST prompt token separate (id_last, "in flight") —
+        // it is decoded as the first token of the first speculative batch.
+        const size_t n_mirror = user_tokens.size() - 1;
+        llama_batch batch_dft = llama_batch_init(g_system_tokens.size() + n_mirror + 8, 0, 1);
+        for (size_t i = 0; i < g_system_tokens.size(); ++i) {
+            common_batch_add(batch_dft, g_system_tokens[i], (llama_pos) i, {0}, false);
+        }
+        for (size_t i = 0; i < n_mirror; ++i) {
+            common_batch_add(batch_dft, user_tokens[i], (llama_pos) (g_system_tokens.size() + i), {0}, false);
+        }
+        const int ret_dft = llama_decode(g_context_dft, batch_dft);
+        llama_batch_free(batch_dft);
+        if (ret_dft != 0) {
+            LOGw("%s: draft prompt mirror failed (%d), disabling speculation", __func__, ret_dft);
+            g_spec_active = false;
+        } else {
+            g_spec_prompt.clear();
+            g_spec_prompt.insert(g_spec_prompt.end(), g_system_tokens.begin(), g_system_tokens.end());
+            g_spec_prompt.insert(g_spec_prompt.end(), user_tokens.begin(), user_tokens.begin() + n_mirror);
+            // The target prompt is also decoded WITHOUT its last token; that
+            // token becomes id_last, decoded as the first spec batch token.
+            llama_memory_clear(llama_get_memory(g_context), false);
+            llama_batch batch_tgt = llama_batch_init(g_system_tokens.size() + n_mirror + 8, 0, 1);
+            for (size_t i = 0; i < g_system_tokens.size(); ++i) {
+                common_batch_add(batch_tgt, g_system_tokens[i], (llama_pos) i, {0}, false);
+            }
+            for (size_t i = 0; i < n_mirror; ++i) {
+                common_batch_add(batch_tgt, user_tokens[i], (llama_pos) (g_system_tokens.size() + i), {0}, false);
+            }
+            const int ret_tgt = llama_decode(g_context, batch_tgt);
+            llama_batch_free(batch_tgt);
+            if (ret_tgt != 0) {
+                LOGw("%s: target prompt mirror failed (%d), disabling speculation", __func__, ret_tgt);
+                g_spec_active = false;
+            } else {
+                g_spec_n_past = (int) g_spec_prompt.size();
+                current_position = g_spec_n_past;
+                g_spec_id_last = user_tokens.back();
+                g_spec_queue.clear();
+                // prefix cache tracks exactly the KV contents (id_last excluded)
+                g_cached_prompt_tokens = g_spec_prompt;
+                common_speculative_begin(g_spec, 0, g_spec_prompt);
+                LOGi("%s: spec ready (n_past=%d)", __func__, g_spec_n_past);
+            }
+        }
+    }
     return 0;
 }
 
@@ -633,6 +789,12 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_generateNextToken(
     if (current_position >= DEFAULT_CONTEXT_SIZE - OVERFLOW_HEADROOM) {
         LOGw("%s: Context full! Shifting...", __func__);
         shift_context();
+        if (g_spec_active) {
+            // The draft KV must mirror the shift; simplest correct fallback is
+            // to drop speculation for the remainder of this generation.
+            g_spec_active = false;
+            g_spec_queue.clear();
+        }
     }
 
     // Stop if reaching the marked position
@@ -641,47 +803,161 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_generateNextToken(
         return nullptr;
     }
 
-    // Sample next token
-    const auto new_token_id = common_sampler_sample(g_sampler, g_context, -1);
-    common_sampler_accept(g_sampler, new_token_id, true);
+    // ---- emit one queued token if available (speculative round already ran) ----
+    if (!g_spec_queue.empty()) {
+        const llama_token id = g_spec_queue.front();
+        g_spec_queue.erase(g_spec_queue.begin());
 
-    // Populate the batch with new token, then decode
-    common_batch_clear(g_batch);
-    common_batch_add(g_batch, new_token_id, current_position, {0}, true);
-    if (llama_decode(g_context, g_batch) != 0) {
-        LOGe("%s: llama_decode() failed for generated token", __func__);
+        // NOTE: current_position already accounts for this token; do not
+        // advance. The prefix cache was already updated by the round that
+        // produced this token (bonus excluded - it is still in flight).
+        if (llama_vocab_is_eog(llama_model_get_vocab(g_model), id)) {
+            LOGd("id: %d,\tIS EOG!\\nSTOP.", id);
+            chat_add_and_format(ROLE_ASSISTANT, assistant_ss.str());
+            return nullptr;
+        }
+        auto new_token_chars = common_token_to_piece(g_context, id);
+        cached_token_chars += new_token_chars;
+        jstring result = nullptr;
+        if (is_valid_utf8(cached_token_chars.c_str())) {
+            result = env->NewStringUTF(cached_token_chars.c_str());
+            assistant_ss << cached_token_chars;
+            cached_token_chars.clear();
+        } else {
+            result = env->NewStringUTF("");
+        }
+        return result;
+    }
+
+    // ---- normal single-token path (no speculation active) ----
+    if (!g_spec_active) {
+        const auto new_token_id = common_sampler_sample(g_sampler, g_context, -1);
+        common_sampler_accept(g_sampler, new_token_id, true);
+
+        common_batch_clear(g_batch);
+        common_batch_add(g_batch, new_token_id, current_position, {0}, true);
+        if (llama_decode(g_context, g_batch) != 0) {
+            LOGe("%s: llama_decode() failed for generated token", __func__);
+            return nullptr;
+        }
+        g_cached_prompt_tokens.push_back(new_token_id);
+        current_position++;
+
+        if (llama_vocab_is_eog(llama_model_get_vocab(g_model), new_token_id)) {
+            LOGd("id: %d,\tIS EOG!\\nSTOP.", new_token_id);
+            chat_add_and_format(ROLE_ASSISTANT, assistant_ss.str());
+            return nullptr;
+        }
+        auto new_token_chars = common_token_to_piece(g_context, new_token_id);
+        cached_token_chars += new_token_chars;
+        jstring result = nullptr;
+        if (is_valid_utf8(cached_token_chars.c_str())) {
+            result = env->NewStringUTF(cached_token_chars.c_str());
+            LOGv("id: %d,\tcached: `%s`,\tnew: `%s`", new_token_id, cached_token_chars.c_str(), new_token_chars.c_str());
+            assistant_ss << cached_token_chars;
+            cached_token_chars.clear();
+        } else {
+            LOGv("id: %d,\tappend to cache", new_token_id);
+            result = env->NewStringUTF("");
+        }
+        return result;
+    }
+
+    // ---- speculative round: draft K tokens, verify in ONE target pass ----
+    const int n_draft_max = std::min(g_spec_n_max, (int) (stop_generation_position - current_position - 2));
+    if (n_draft_max <= 0) {
         return nullptr;
     }
 
-    // Track generated tokens in the prefix cache: the assistant reply becomes
-    // the shared prefix of the NEXT turn's prompt, so it must be cached too
-    // (the tokenizer reproduces the same ids from the raw text).
-    g_cached_prompt_tokens.push_back(new_token_id);
+    llama_tokens draft;
+    common_speculative_draft_params dparams = {
+        /* .drafting = */ true,
+        /* .n_max    = */ n_draft_max,
+        /* .n_past   = */ current_position,
+        /* .id_last  = */ g_spec_id_last,
+        /* .prompt   = */ &g_spec_prompt,
+        /* .result   = */ &draft,
+    };
+    common_speculative_get_draft_params(g_spec, 0) = dparams;
+    common_speculative_draft(g_spec);
 
-    // Update position
-    current_position++;
+    // Roll the draft context back to the pre-draft position: draft() already
+    // advanced the draft KV, and process() below must re-decode the target
+    // batch starting at seq_pos_max+1 (contiguity requirement).
+    llama_memory_seq_rm(llama_get_memory(g_context_dft), 0, current_position, -1);
 
-    // Stop if next token is EOG
-    if (llama_vocab_is_eog(llama_model_get_vocab(g_model), new_token_id)) {
-        LOGd("id: %d,\tIS EOG!\nSTOP.", new_token_id);
+    // Target verifies [id_last, draft0..draftN-1] in one batched forward pass.
+    // id_last lives at current_position (in flight, not in KV); drafts follow.
+    common_batch_clear(g_batch);
+    common_batch_add(g_batch, g_spec_id_last, current_position, {0}, true);
+    for (size_t i = 0; i < draft.size(); ++i) {
+        common_batch_add(g_batch, draft[i], current_position + 1 + i, {0}, true);
+    }
+    if (llama_decode(g_context, g_batch) != 0) {
+        LOGe("%s: llama_decode() failed for speculative batch", __func__);
+        g_spec_active = false;
+        return nullptr;
+    }
+
+    // Feed the batch to the draft impl (keeps draft KV in sync with target).
+    if (!common_speculative_process(g_spec, g_batch)) {
+        LOGe("%s: speculative process failed, disabling", __func__);
+        g_spec_active = false;
+        return nullptr;
+    }
+
+    // Rejection-sample: accept the longest draft prefix the target agrees with.
+    auto ids = common_sampler_sample_and_accept_n(g_sampler, g_context, draft);
+    if (ids.empty()) {
+        g_spec_active = false;
+        return nullptr;
+    }
+    common_speculative_accept(g_spec, 0, (uint16_t) (ids.size() - 1));
+
+    // Commit accepted tokens: n_past advances by (ids.size() - 1) draft tokens,
+    // and the last id is the bonus target token (stays "in flight" as id_last).
+    g_spec_prompt.push_back(g_spec_id_last);           // old id_last, now decoded in KV
+    for (size_t i = 0; i + 1 < ids.size(); ++i) {
+        g_spec_prompt.push_back(ids[i]);               // accepted drafts
+    }
+    current_position += (int) ids.size();
+    g_spec_id_last = ids.back();                       // bonus token, in flight
+
+    // Trim the unaccepted draft tail from both contexts.
+    llama_memory_seq_rm(llama_get_memory(g_context), 0, current_position, -1);
+    if (g_context_dft) {
+        llama_memory_seq_rm(llama_get_memory(g_context_dft), 0, current_position, -1);
+    }
+
+    // Queue everything except the first token (which we return now).
+    for (size_t i = 1; i < ids.size(); ++i) {
+        g_spec_queue.push_back(ids[i]);
+    }
+
+    const llama_token id0 = ids[0];
+    // Prefix cache mirrors the KV: the bonus token (ids.back()) is in flight
+    // (trimmed from the KV), so it is NOT cached. Accepted drafts are.
+    for (size_t i = 0; i + 1 < ids.size(); ++i) {
+        g_cached_prompt_tokens.push_back(ids[i]);
+    }
+    // Spec stats
+    g_spec_n_accept += (long) ids.size() - 1;
+    g_spec_n_drafted += (long) draft.size();
+    g_spec_rounds++;
+    if (llama_vocab_is_eog(llama_model_get_vocab(g_model), id0)) {
+        LOGd("id: %d,\tIS EOG!\\nSTOP.", id0);
         chat_add_and_format(ROLE_ASSISTANT, assistant_ss.str());
         return nullptr;
     }
-
-    // If not EOG, convert to text
-    auto new_token_chars = common_token_to_piece(g_context, new_token_id);
+    auto new_token_chars = common_token_to_piece(g_context, id0);
     cached_token_chars += new_token_chars;
-
-    // Create and return a valid UTF-8 Java string
     jstring result = nullptr;
     if (is_valid_utf8(cached_token_chars.c_str())) {
         result = env->NewStringUTF(cached_token_chars.c_str());
-        LOGv("id: %d,\tcached: `%s`,\tnew: `%s`", new_token_id, cached_token_chars.c_str(), new_token_chars.c_str());
-
+        LOGi("spec: accepted %d/%d draft tokens", (int) ids.size() - 1, (int) draft.size());
         assistant_ss << cached_token_chars;
         cached_token_chars.clear();
     } else {
-        LOGv("id: %d,\tappend to cache", new_token_id);
         result = env->NewStringUTF("");
     }
     return result;
@@ -689,11 +965,35 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_generateNextToken(
 
 
 extern "C"
+JNIEXPORT jstring JNICALL
+Java_com_arm_aichat_internal_InferenceEngineImpl_getSpecStatsNative(JNIEnv *env, jobject /*unused*/) {
+    std::ostringstream ss;
+    ss << (g_spec_active ? "true" : "false") << "|" << g_spec_rounds << "|" << g_spec_n_accept << "|" << g_spec_n_drafted;
+    return env->NewStringUTF(ss.str().c_str());
+}
+
+extern "C"
 JNIEXPORT void JNICALL
 Java_com_arm_aichat_internal_InferenceEngineImpl_unload(JNIEnv * /*unused*/, jobject /*unused*/) {
     // Reset long-term & short-term states
     reset_long_term_states();
     reset_short_term_states();
+
+    // Free speculative-decoding resources (draft model + context).
+    if (g_spec) {
+        common_speculative_free(g_spec);
+        g_spec = nullptr;
+    }
+    if (g_context_dft) {
+        llama_free(g_context_dft);
+        g_context_dft = nullptr;
+    }
+    if (g_model_dft) {
+        llama_model_free(g_model_dft);
+        g_model_dft = nullptr;
+    }
+    g_spec_active = false;
+    g_spec_queue.clear();
 
     // Free up resources
     common_sampler_free(g_sampler);

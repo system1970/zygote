@@ -114,6 +114,12 @@ internal class InferenceEngineImpl private constructor(
     @FastNative
     private external fun setBigCorePinningNative(enabled: Boolean)
 
+    /** Loads a draft model for speculative decoding; safe no-op on failure. */
+    private external fun setDraftModelNative(modelPath: String): Int
+
+    /** Spec stats: "active|rounds|accepted|drafted" (for telemetry). */
+    private external fun getSpecStatsNative(): String
+
     private val _state =
         MutableStateFlow<InferenceEngine.State>(InferenceEngine.State.Uninitialized)
     override val state: StateFlow<InferenceEngine.State> = _state.asStateFlow()
@@ -288,6 +294,19 @@ internal class InferenceEngineImpl private constructor(
             setBigCorePinningNative(enabled)
         }
     }
+
+    /** Loads a draft model for speculative decoding (safe no-op on failure). */
+    override suspend fun setDraftModel(modelPath: String): Boolean = withContext(llamaDispatcher) {
+        val rc = setDraftModelNative(modelPath)
+        if (rc == 0) {
+            Log.i(TAG, "Speculative decoding draft model loaded: $modelPath")
+        } else {
+            Log.w(TAG, "Draft model load skipped (rc=$rc): $modelPath")
+        }
+        rc == 0
+    }
+
+    override fun getSpecStats(): String = getSpecStatsNative()
 
     /**
      * Unloads the model and frees resources, or reset error states
