@@ -24,21 +24,21 @@ harness/models/
 *.gguf
 
 # --- Android / Gradle build output ---
-orkestrate-app/.gradle/
-orkestrate-app/build/
-orkestrate-app/app/build/
-orkestrate-app/lib/build/
-orkestrate-app/local.properties
-orkestrate-app/.kotlin/
+zygote-app/.gradle/
+zygote-app/build/
+zygote-app/app/build/
+zygote-app/lib/build/
+zygote-app/local.properties
+zygote-app/.kotlin/
 *.apk
 *.aab
 
 # --- native build artifacts ---
-orkestrate-app/lib/src/main/cpp/build-llama/
-orkestrate-app/lib/src/main/cpp/CMakeFiles/
-orkestrate-app/lib/src/main/cpp/cmake_install.cmake
-orkestrate-app/lib/src/main/cpp/CMakeCache.txt
-orkestrate-app/lib/.cxx/
+zygote-app/lib/src/main/cpp/build-llama/
+zygote-app/lib/src/main/cpp/CMakeFiles/
+zygote-app/lib/src/main/cpp/cmake_install.cmake
+zygote-app/lib/src/main/cpp/CMakeCache.txt
+zygote-app/lib/.cxx/
 
 # --- PWA ---
 zygote-pwa/node_modules/

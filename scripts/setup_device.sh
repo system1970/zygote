@@ -9,7 +9,7 @@
 set -e
 cd "$(dirname "$0")/.."
 ADB="android-sdk/platform-tools/adb.exe"
-APK="${1:-orkestrate-app/app/build/outputs/apk/debug/app-debug.apk}"
+APK="${1:-zygote-app/app/build/outputs/apk/debug/app-debug.apk}"
 PKG="com.example.llama.aichat"
 MODELS_SRC="/sdcard/zygote-models"
 STAGE="/data/local/tmp/zygote-stage"

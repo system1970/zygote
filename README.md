@@ -73,7 +73,7 @@ git clone https://github.com/ggml-org/llama.cpp.git
 git -C llama.cpp apply ../patches/llama-arch-lfm2-rs-rollback.patch
 
 # 3. Build the app
-cd orkestrate-app
+cd zygote-app
 export JAVA_HOME=<jdk17>
 ./gradlew :app:assembleDebug
 

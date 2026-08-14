@@ -44,7 +44,7 @@ both quantized for this device, and routes between them.
 
 ```bash
 # Build + install (uses bundled JDK)
-cd orkestrate-app
+cd zygote-app
 export JAVA_HOME=$PWD/../jdk/jdk
 ./gradlew assembleDebug
 adb install -r app/build/outputs/apk/debug/app-debug.apk

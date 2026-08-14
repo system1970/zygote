@@ -36,7 +36,7 @@ No cloud. No Node. No proot. Pure native ARM + Kotlin harness.
 
 ```bash
 # build + install app with the harness module
-cd orkestrate-app
+cd zygote-app
 JAVA_HOME=../jdk/jdk ./gradlew assembleDebug
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 

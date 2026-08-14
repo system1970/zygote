@@ -68,7 +68,7 @@ PWA (React, WebView)  ── http://127.0.0.1:8787 ──►  ZygoteServer (in-a
 
 ```bash
 # Build + install + restore models (models survive wipes in /sdcard/zygote-models)
-cd orkestrate-app
+cd zygote-app
 export JAVA_HOME=$PWD/../jdk/jdk          # JDK 21 toolchain
 ./gradlew assembleDebug
 bash ../scripts/setup_device.sh
@@ -99,7 +99,7 @@ harness/
 ├── lib/.../com/zygote/agent/   ← AgentLoop · ToolRegistry · PhoneTools · Lfm2Format · NativeModelBackend
 ├── verify/Verify.kt     ← JVM format/parse verification
 zygote-pwa/              ← React PWA (DeepSeek-Harness-style), static build
-orkestrate-app/          ← native Android app: engine (KleidiAI), harness, server, WebView
+zygote-app/          ← native Android app: engine (KleidiAI), harness, server, WebView
 scripts/setup_device.sh  ← one-command device bring-up
 ```
 
