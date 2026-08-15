@@ -206,6 +206,8 @@ class ZygoteServer(private val ctx: Context, private val port: Int = 8787) : Run
 
     private fun telemetryJson(sessionId: String?): String {
         val memInfo = File("/proc/meminfo").readText()
+        val memTotalMb = (Regex("MemTotal:\\s+(\\d+)").find(memInfo)?.groupValues?.get(1)?.toLongOrNull()
+            ?: 0L) / 1024L
         val memAvailableMb = (Regex("MemAvailable:\\s+(\\d+)").find(memInfo)?.groupValues?.get(1)?.toLongOrNull()
             ?: 0L) / 1024L
         val battery = ctx.getSystemService(Context.BATTERY_SERVICE) as? BatteryManager
@@ -236,6 +238,7 @@ class ZygoteServer(private val ctx: Context, private val port: Int = 8787) : Run
           "model": "$modelName",
           "tok_per_sec": $tokPerSec,
           "ttft_ms": $ttftMs,
+          "ram_total_mb": $memTotalMb,
           "ram_mb": $memAvailableMb,
           "battery_pct": $batteryPct,
           "turns": $turns,

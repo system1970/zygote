@@ -655,7 +655,9 @@ export function StatusBar({
     ? `${tok > 0 ? tok.toFixed(0) : '…'} tok/s`
     : `${tok > 0 ? tok.toFixed(0) : '—'} tok/s`;
   const ttft = t && t.ttft_ms > 0 ? fmtDuration(t.ttft_ms) : '—';
-  const ram = t ? `${(t.ram_mb / 1024).toFixed(1)}G` : '—';
+  const ram = t
+    ? `${(t.ram_total_mb / 1024).toFixed(1)}G · ${(t.ram_mb / 1024).toFixed(1)}G free`
+    : '—';
   const batt = t && t.battery_pct >= 0 ? `${t.battery_pct}%` : '—';
 
   const groups = [

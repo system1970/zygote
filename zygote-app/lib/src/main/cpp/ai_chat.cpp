@@ -32,7 +32,12 @@ static std::string join(const std::vector<T> &values, const std::string &delim) 
  * LLama resources: context, model, batch and sampler
  */
 constexpr int   N_THREADS_MIN           = 2;
-constexpr int   N_THREADS_MAX           = 8;
+// Decode (GEMV, memory-bandwidth-bound) wants FEW threads: 7 threads measured
+// 4.07 t/s vs 14.2 t/s at 4 threads on the 1.2B — bus contention + sync
+// overhead dominate. Prefill (GEMM, compute-bound) wants MANY: 7 threads
+// measured 50.8 vs 45.7 t/s at 4 threads. Split them.
+constexpr int   N_THREADS_MAX           = 4;
+constexpr int   N_THREADS_BATCH_MAX     = 8;
 constexpr int   N_THREADS_HEADROOM      = 1;
 
 constexpr int   DEFAULT_CONTEXT_SIZE    = 4096;
@@ -114,7 +119,7 @@ Java_com_arm_aichat_internal_InferenceEngineImpl_setDraftModelNative(JNIEnv *env
     cparams.n_threads_batch = 2;
     cparams.type_k = g_cache_type_k;
     cparams.type_v = g_cache_type_v;
-    cparams.n_rs_seq = 256;
+    cparams.n_rs_seq = std::min(256u, cparams.n_ctx - 2);
     auto *ctx_dft = llama_init_from_model(model_dft, cparams);
     if (!ctx_dft) {
         LOGe("%s: failed to init draft context", __func__);
@@ -193,11 +198,15 @@ static llama_context *init_context(llama_model *model, const int n_ctx = DEFAULT
         return nullptr;
     }
 
-    // Multi-threading setup
+    // Multi-threading setup: decode threads (GEMV, bus-bound) stay low;
+    // batch/prefill threads (GEMM, compute-bound) go high.
     const int n_threads = std::max(N_THREADS_MIN, std::min(N_THREADS_MAX,
                                                      (int) sysconf(_SC_NPROCESSORS_ONLN) -
                                                      N_THREADS_HEADROOM));
-    LOGi("%s: Using %d threads", __func__, n_threads);
+    const int n_threads_batch = std::max(N_THREADS_MIN, std::min(N_THREADS_BATCH_MAX,
+                                                     (int) sysconf(_SC_NPROCESSORS_ONLN) -
+                                                     N_THREADS_HEADROOM));
+    LOGi("%s: Using %d threads (decode), %d threads (prefill)", __func__, n_threads, n_threads_batch);
 
     // Context parameters setup
     llama_context_params ctx_params = llama_context_default_params();
@@ -210,7 +219,7 @@ static llama_context *init_context(llama_model *model, const int n_ctx = DEFAULT
     ctx_params.n_batch = BATCH_SIZE;
     ctx_params.n_ubatch = BATCH_SIZE;
     ctx_params.n_threads = n_threads;
-    ctx_params.n_threads_batch = n_threads;
+    ctx_params.n_threads_batch = n_threads_batch;
     // Q8_0 KV cache: halves attention KV traffic on a decode that is only
     // ~46% bandwidth-saturated — frees bandwidth for the dominant weight reads.
     ctx_params.type_k = g_cache_type_k;
@@ -222,7 +231,9 @@ static llama_context *init_context(llama_model *model, const int n_ctx = DEFAULT
     // MUST be < n_ubatch: the hybrid split keeps the trailing (1+n_rs_seq)
     // tokens in one ubatch (split_equal n_keep_tail), so 256 (257 <= 512)
     // is the max that fits. Recurrent buffer scales as (1+n_rs_seq): ~40 MiB.
-    ctx_params.n_rs_seq = 256;
+    // Clamp to n_ctx-2: small bench contexts clamp n_ubatch to n_ctx, and
+    // split_equal asserts n_ubatch > n_keep_tail (so n_rs_seq+1 < n_ctx).
+    ctx_params.n_rs_seq = std::min(256u, (uint32_t) std::max(0, n_ctx - 2));
     auto *context = llama_init_from_model(g_model, ctx_params);
     if (context == nullptr) {
         LOGe("%s: llama_new_context_with_model() returned null)", __func__);

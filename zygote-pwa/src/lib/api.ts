@@ -37,6 +37,7 @@ export interface Telemetry {
   model: string;
   tok_per_sec: number;
   ttft_ms: number;
+  ram_total_mb: number;
   ram_mb: number;
   battery_pct: number;
   turns: number;
