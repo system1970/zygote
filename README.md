@@ -60,9 +60,51 @@ Two tiers, both measured on the phone with the benchmark instrument (pp 128, tg 
 | LFM2.5-230M Q4_0 | fast router: intent classification | 142 MB | 251 tok/s | 51.1 tok/s |
 | LFM2.5-1.2B-Instruct Q4_0 | main agent | 664 MB | 67 tok/s | 14.7 tok/s |
 
-The 2.6B tier was evaluated and dropped: it measured 15.1 tok/s prefill and 1.49 tok/s decode on this phone, and its tool-call reliability did not justify the wait. The 230M is Liquid's data-extraction model, so it is not a chat model; it runs as the fast router tier (2 ms intent classification at 251 tok/s prefill) and as the speculative-decoding draft when enabled. LFM2.5-1.2B-Instruct is Liquid's recommended pick for general use, verified on-device with the full agent loop including tool calling.
+The 2.6B tier was evaluated and dropped as the main agent: it measured 15.1 tok/s prefill and 1.49 t/s decode on this phone, and its tool-call reliability did not justify the wait. It produced the best multi-turn agent sessions of the three tiers (see [Prompting guide](#prompting-guide)). The 230M is Liquid's data-extraction model, so it is not a chat model; it runs as the fast router tier (2 ms intent classification at 251 tok/s prefill) and as the speculative-decoding draft when enabled. LFM2.5-1.2B-Instruct is Liquid's recommended pick for general use, verified on-device with the full agent loop including tool calling.
 
 Download: `hf download LiquidAI/LFM2.5-1.2B-Instruct-GGUF LFM2.5-1.2B-Instruct-Q4_0.gguf --local-dir models/`
+
+## Prompting guide
+
+These are the quirks we measured while running the agent loop for days on this phone, plus the fixes that hold up. The vendor reference is [Liquid's text-generation and prompting docs](https://docs.liquid.ai/lfm/key-concepts/text-generation-and-prompting).
+
+### Tier ranking for agent work (measured, not vibes)
+
+- **2.6B produced the best multi-turn agent sessions** of all three tiers: most consistent tool-call formatting, most coherent follow-up actions, least derailing. It lost the main-agent slot on throughput alone (15.1 t/s prefill, 1.49 t/s decode meant minute-long waits). If you have a faster device, this is the tier to run for agentic work.
+- **1.2B is the shipped main agent**: good tool calling, and fast enough (67 t/s prefill, 14.7 t/s decode). It needs explicit, imperative prompts for reliable tool use (see below).
+- **230M is the worst at agent work**, by a wide margin. It is Liquid's data-extraction model, not a chat model: it derails multi-turn sessions, ignores tool directives, and answers out of distribution. It is the router tier (2 ms intent classification) and nothing else.
+
+### Multi-turn intelligence degrades
+
+Every tier loses coherence as a session grows. By turn 8-10 on the 1.2B, the model starts to (a) repeat tool calls from earlier turns, (b) answer as if the system prompt had changed, and (c) drop tool directives it followed on turn 2. The KV-prefix cache keeps TTFT flat (that is a cache win, not a model win), but the model's attention still spreads across the full history. Fixes that work:
+
+- Start a fresh session for a new task instead of extending a long one. Session resume is replay, so nothing is lost.
+- Keep the system prompt short. Long system prompts degrade faster than long conversations.
+- When a session starts derailing, rotate the session rather than pushing through. A 3-turn session on the 1.2B beats a 15-turn one.
+
+### Tool calling is prompt-sensitive and inconsistent
+
+The 1.2B's tool-call behavior is stochastic: the same request in the same session can produce a tool call on one attempt and prose on the next. We observed the identical prompt ("Call the shell tool with command pwd. That is the only action. Use shell, not any other tool.") succeed on one run and get refused on the next. Patterns that measurably improve the hit rate:
+
+- **Be imperative and specific**: "Call the shell tool with command X. That is the only action. Use shell, not any other tool." beats "Can you check something for me?" every time.
+- **One command per request.** Compound commands with `;`, `&&`, or `$()` make the model write the command as prose instead of calling the tool.
+- **Name the tool explicitly.** "Use the shell function" and "Use the todo tool" both outperform vague asks like "do this".
+- **Retry on refusal.** The same prompt succeeded on the second attempt in our testing (we observed one run refuse, the identical prompt on a fresh session call the tool). The harness loop already handles this; the model is not broken, it is sampling.
+- **Do not fight a refusal streak.** If a session refuses tool calls 2-3 times in a row, rotate the session. Refusal streaks persist within a session and reset on a fresh one.
+
+### Generation parameters (what Zygote ships)
+
+`ai_chat.cpp` sets the vendor-recommended values for LFM2.5-1.2B-Instruct on top of llama.cpp defaults:
+
+| Parameter | Value | Why |
+|---|---|---|
+| `temperature` | 0.3 | Deterministic enough for tool calling, less robotic than 0.1 for chat |
+| `top_k` | 50 | Vendor recommendation for 1.2B-Instruct |
+| `repetition_penalty` | 1.05 | Vendor recommendation; also suppresses looped tool calls in long sessions |
+| `top_p` | 0.95 (default) | Kept at llama.cpp default; matched our tool-call tuning passes |
+| `min_p` | 0.05 (default) | Same |
+
+The `temperature` is passed through from the request, so the server can lower it to 0.1 for stricter tool-call runs. The vendor docs also recommend `top_p=0.1` for the Thinking variant only; the Instruct model does not need it.
 
 ## Build
 
