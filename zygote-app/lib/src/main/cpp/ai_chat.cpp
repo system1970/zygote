@@ -287,7 +287,13 @@ static void pin_threads_to_big_cores() {
 
 static common_sampler *new_sampler(float temp) {
     common_params_sampling sparams;
+    // Liquid's recommended settings for LFM2.5-1.2B-Instruct:
+    // temperature=0.1, top_k=50, repetition_penalty=1.05 (docs.liquid.ai).
+    // Defaults we deliberately keep: top_p (0.95) and min_p (0.05) stay at
+    // llama.cpp defaults, which matched the tool-call tuning passes.
     sparams.temp = temp;
+    sparams.top_k = 50;
+    sparams.penalty_repeat = 1.05f;
     return common_sampler_init(g_model, sparams);
 }
 
