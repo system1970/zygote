@@ -47,7 +47,7 @@ flowchart TB
 ## Why it matters
 
 - **Truly on-device.** The 1.2B model runs 100% local. `ZygoteServer` binds `127.0.0.1` only, so nothing leaves the device.
-- **Fast on cheap hardware.** Measured on the $150 phone: **14.7 tok/s decode, 67 tok/s prefill (pp128), ~1.7s warm time-to-first-token (TTFT)** with native key-value (KV) prefix caching, 62% faster than the ~4.6s cold path.
+- **Fast on cheap hardware.** Measured on the $150 phone: **14.7 tok/s decode, 67 tok/s prefill (pp128), ~1.7s warm time-to-first-token (TTFT)** with native key-value (KV) prefix caching. TTFT fell 34× from the 59.6s baseline across a real multi-turn conversation, and 62% from the ~4.6s cold path.
 - **Agentic, not chat-only.** 11 tools (screen reading, tap, type, swipe, open app, call, SMS, shell, todos), LFM2.5 native tool-call parsing, per-session todos.
 - **Honest telemetry.** Every number in the status bar is measured on-device and scoped per session. No invented cache-hit percentages.
 
@@ -60,7 +60,7 @@ Two tiers, both measured on the phone with the benchmark instrument (pp 128, tg 
 | LFM2.5-230M Q4_0 | fast router: intent classification | 142 MB | 251 tok/s | 51.1 tok/s |
 | LFM2.5-1.2B-Instruct Q4_0 | main agent | 664 MB | 67 tok/s | 14.7 tok/s |
 
-The 2.6B tier was evaluated and dropped: it delivered ~7 tok/s on this phone, and its tool-call reliability did not justify the wait. The 230M is Liquid's data-extraction model, so it is not a chat model; it runs as the fast router tier (2 ms intent classification at 251 tok/s prefill) and as the speculative-decoding draft when enabled. LFM2.5-1.2B-Instruct is Liquid's recommended pick for general use, verified on-device with the full agent loop including tool calling.
+The 2.6B tier was evaluated and dropped: it measured 15.1 tok/s prefill and 1.49 tok/s decode on this phone, and its tool-call reliability did not justify the wait. The 230M is Liquid's data-extraction model, so it is not a chat model; it runs as the fast router tier (2 ms intent classification at 251 tok/s prefill) and as the speculative-decoding draft when enabled. LFM2.5-1.2B-Instruct is Liquid's recommended pick for general use, verified on-device with the full agent loop including tool calling.
 
 Download: `hf download LiquidAI/LFM2.5-1.2B-Instruct-GGUF LFM2.5-1.2B-Instruct-Q4_0.gguf --local-dir models/`
 
@@ -92,13 +92,24 @@ bash ../scripts/setup_device.sh
 - **AgentLoop** (`lib/src/main/java/com/zygote/agent/`) implements the skill-picker pattern: the model never performs actions itself, it picks a tool and arguments, and the harness executes and feeds results back. LFM2.5's `<|tool_call_start|>[fn(args)]<|tool_call_end|>` format is parsed natively, including multi-call blocks.
 - **Sessions** use append-only JSON Lines (JSONL) per session (Claude Code style), one event per line with a monotonic `seq` (opencode style). Admission-first: the user message is durably logged before the model runs, so nothing is lost on crash. Resume equals replay.
 - **KV-prefix cache** (`ai_chat.cpp`) reuses the byte-identical prompt prefix every turn: only the suffix is re-prefilled, and the divergent KV tail is trimmed via `llama_memory_seq_rm` with bounded recurrent-state rollback. Warm TTFT: **~1.7s vs ~4.6s cold (−62%)**.
-- **Thread split** (decode 4, prefill 8): decode is a memory-bandwidth-bound general matrix-vector multiply (GEMV), so 4 threads measured 14.7 tok/s where 7 threads measured 4.07 tok/s. Prefill is compute-bound general matrix-matrix multiply (GEMM), where 8 threads measured 67 tok/s vs 45.7 at 4 threads. The split gets both maxima.
+- **Thread split** (decode 4, prefill 8): decode is a memory-bandwidth-bound general matrix-vector multiply (GEMV), so 4 threads measured 14.7 tok/s where 7 threads measured 4.07 tok/s. Prefill is compute-bound general matrix-matrix multiply (GEMM), where 8 threads measured 67 tok/s vs 45.7 at 4 threads. The split gets both maxima. The regression (8 decode threads) was caught by the benchmark instrument, not by feel.
 - **Relevance-filtered tools** inject only the tools relevant to the current request (Liquid's recommendation), cutting prefill tokens 5-10× on short turns.
-- **Telemetry** reports per-session counters, segment-accurate tok/s (tool-gap time excluded), and real RAM and battery from the device. No hardcoded values.
+- **Sandbox-aware shell tool** (`PhoneTools.kt`): Android apps run `sh` with cwd `/` and no HOME, so nearly every command fails with permission denied. The shell tool sets a writable home (the app files dir), exports `HOME`/`TMPDIR`, merges stderr into stdout, probes for `su` first (root access when the device is rooted), and caps every run at 15 seconds so an interactive su prompt cannot wedge the agent.
+- **Speculative decoding (measured negative)** (`ai_chat.cpp`): a full DSpark-style loop is implemented, a 230M draft that mirrors the target KV layout while the 1.2B verifies the draft batch in one pass, with in-flight token bookkeeping keeping the hybrid cache consistent. Measured on-device: 20–39% acceptance, which made decode slower (3.7–5.3 tok/s vs 14.7 single-model), because the 230M is a different model family that does not predict the 1.2B. It ships behind a flag (`SPECULATIVE_DECODE_ENABLED=false`) with the numbers documented rather than deleted.
+- **Telemetry** reports per-session counters, segment-accurate tok/s (tool-gap time excluded), and real RAM (total and free) and battery from the device. No hardcoded values.
 
 ## Verification
 
 Ad-hoc verification scripts live in `harness/verify/` and proofs in `harness/proof/` (SPINE, PHONETOOLS, BENCHMARK, PWA). The full `connectedDebugAndroidTest` suite is deliberately avoided: it wipes app data on this device. The verification model is script-driven against a live device with models in shared storage (`scripts/setup_device.sh`).
+
+**Benchmark instrument** (`ZygoteBenchmarkTest.kt`): an Android instrument that loads each GGUF and measures prefill (pp 128) and decode (tg 64) on the device, cold, after a force-stop. It caught the decode-thread regression (7 threads: 4.07 tok/s vs 4 threads: 14.7 tok/s) that warm in-app numbers masked, and it guards `n_rs_seq` sizing for small contexts. Run it with:
+
+```bash
+adb shell am instrument -w -e class com.example.llama.ZygoteBenchmarkTest \
+  com.example.llama.aichat.test/androidx.test.runner.AndroidJUnitRunner
+```
+
+Cold-run numbers in this README come from that instrument. Warm in-app numbers (repeated same-session turns) run lower on a thermally throttled phone, so a 20-minute benchmark session measured 11.9 tok/s where the cold run measured 14.7. Both are honest, and the README labels which is which.
 
 ## Known issues
 
@@ -108,6 +119,7 @@ See [GitHub Issues](https://github.com/system1970/zygote/issues) for the live li
 - Message rendering: an aborted run can leave the turn-ref pointing at the previous assistant bubble (mitigated, regression-tested ad-hoc)
 - Hybrid KV-cache rollback window (`n_rs_seq` = 256): trims beyond it fall back to full re-decode
 - The 1.2B occasionally emits malformed tool calls; the parser is regex-based with no nested-quote arguments yet
+- The shell tool cannot read shell-uid paths (`/data/local/tmp`) on an unrooted device; Android's sandbox denies it regardless of the tool's HOME setup
 - No vision support yet (the VL model is not wired into llama.cpp MTMD)
 
 ## License
